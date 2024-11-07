@@ -2930,72 +2930,94 @@ class OnnxConverter(BaseConverter):
                                 ip=self.mlir.insert_point).output
         self.addOperand(onnx_node.name, new_op)
 
+
+
+
     def parse_subgraph(self, op, region_idx, graph_node):
-        converted_nodes = list()
+        # List to hold converted nodes
+        converted_nodes = []
     
-        # Convert nodes 
+        # Convert ONNX nodes to internal nodes and collect them
         for n in graph_node.node:
             node = OnnxNode(n)
             if n.op_type in ["Gather"]:
-                input_shape = dict()
-                for input in n.input:
-                    input_shape[input] = self.get_shape_for_node(graph_node.input, 
-                                                           graph_node.output, 
-                                                           graph_node.value_info, 
-                                                           input)
-                output_shape = dict()
-                for output in n.output:
-                    output_shape[output] = self.get_shape_for_node(graph_node.input,
-                                                             graph_node.output,
-                                                             graph_node.value_info,
-                                                             output)
+                # Collect shape information for specific ops
+                input_shape = {}
+                for input_name in n.input:
+                    input_shape[input_name] = self.get_shape_for_node(
+                        graph_node.input,
+                        graph_node.output,
+                        graph_node.value_info,
+                        input_name,
+                    )
+                output_shape = {}
+                for output_name in n.output:
+                    output_shape[output_name] = self.get_shape_for_node(
+                        graph_node.input,
+                        graph_node.output,
+                        graph_node.value_info,
+                        output_name,
+                    )
                 node.shape_info["input"] = input_shape
                 node.shape_info["output"] = output_shape
             converted_nodes.append(node)
     
-        # Check for unsupported ops
-        unsupported = set()
+        # Check for unsupported operations
+        unsupported_ops = set()
         for n in converted_nodes:
             if n.op_type not in self.onnxop_factory:
-                unsupported.add(n.op_type)
-        if unsupported:
-            raise RuntimeError("Op not support:{}".format(unsupported))
+                unsupported_ops.add(n.op_type)
+        if unsupported_ops:
+            raise RuntimeError(f"Op(s) not supported: {unsupported_ops}")
     
-        # Handle initializers and inputs
+        # Handle initializers (constants) and inputs
         initializer_names = [x.name for x in graph_node.initializer]
-        subgraph_input_names = list()
+        subgraph_input_names = []
     
-        # Setup region and block arguments
+        # Get the region and argument types
         region = op.regions[region_idx]
-        arg_types = list()
+        arg_types = []
     
-        # Handle inputs
+        # Process graph inputs
         for input in graph_node.input:
             if input.name not in initializer_names:
+                # This is a real input (not a constant)
                 shape = self.get_shape_from_value_info_proto(input)
-                dtype = "INT32" if input.type.tensor_type.elem_type in [
-                    onnx.TensorProto.INT64, onnx.TensorProto.INT32, onnx.TensorProto.BOOL
-                ] else "F32"
-                arg_types.append(
-                    self.mlir.get_tensor_type(shape if len(shape) > 0 else [1],
-                                        self.mlir.mlir_type[dtype]))
+                elem_type = input.type.tensor_type.elem_type
+                if elem_type in [
+                    onnx.TensorProto.INT64,
+                    onnx.TensorProto.INT32,
+                    onnx.TensorProto.BOOL,
+                ]:
+                    dtype = "INT32"
+                else:
+                    dtype = "F32"
+                tensor_type = self.mlir.get_tensor_type(
+                    shape if len(shape) > 0 else [1], self.mlir.mlir_type[dtype]
+                )
+                arg_types.append(tensor_type)
+                # Register input name
                 self.input_names.append(input.name)
                 subgraph_input_names.append(input.name)
     
-        # Build block and set insert point
+        # Build a block in the region with the argument types
         self.mlir.buildBlock(region, arg_types)
         self.mlir.reconfig_insert_point(region.blocks[0])
     
-        # Handle input operations
+        # Create operations for inputs
         for idx, input in enumerate(graph_node.input):
             if input.name not in initializer_names:
-                input_op = self.mlir.create_subgraph_input_op(input.name, 
-                                                         arg_types[idx],
-                                                         region.blocks[0].arguments[idx], 
-                                                         {})
+                # Create an operation for this input
+                input_op = self.mlir.create_subgraph_input_op(
+                    input.name,
+                    arg_types[idx],
+                    region.blocks[0].arguments[idx],
+                    {},
+                )
+                # Register the operand
                 self.addOperand(input.name, input_op)
     
-        # Add weights
+        # Handle initializers (constants/weights)
         self.subgraph_initializer = graph_node.initializer
         for tensor in graph_node.initializer:
             name = tensor.name
@@ -3003,37 +3025,52 @@ class OnnxConverter(BaseConverter):
             self.addWeight(name, data)
         self.get_output_name(graph_node)
     
-        # Convert nodes preserving ONNX names
+        # Now process the nodes in the subgraph with debug statements
         for n in converted_nodes:
+            print(f"\nProcessing Node: {n.op_type}")
+            print(f"Inputs: {n.inputs}")
+            print(f"Outputs: {n.outputs}")
+            # Convert the node using the appropriate factory method
             output = self.onnxop_factory.get(n.op_type, lambda x: NoneAndRaise(x))(n)
-            
-            # Store outputs with original ONNX names
+    
+            # Debug after conversion
+            print(f"Output type: {type(output)}")
             if output is not None:
                 if isinstance(output, (list, tuple)):
-                    for idx, out in enumerate(n.outputs):
-                        self.addOperand(out, output[idx])
+                    for idx, out_name in enumerate(n.outputs):
+                        print(f"Registering output {out_name}")
+                        self.addOperand(out_name, output[idx])
                 else:
-                    # Single output case
+                    print(f"Registering output {n.outputs[0]}")
                     self.addOperand(n.outputs[0], output)
+            else:
+                print(f"No output generated for node {n.op_type}")
     
-        # Cleanup input names
-        for n in subgraph_input_names:
-            self.input_names.remove(n)
+        # Cleanup input names (remove subgraph inputs from the global input names list)
+        for input_name in subgraph_input_names:
+            self.input_names.remove(input_name)
     
-        # Handle outputs
-        yield_op = list()
+        # Handle outputs of the subgraph
+        yield_op = []
         for output in graph_node.output:
             if not self.isWeight(output.name):
-                self.output_names.remove(output.name)
+                # It's an operand; get the corresponding operation
+                if output.name in self.output_names:
+                    self.output_names.remove(output.name)
                 op = self.getOperand(output.name)
                 yield_op.append(op)
             else:
+                # It's a weight (constant)
                 yield_op.append(self.getWeightOp(output.name))
     
+        # Create a yield operation to yield the outputs
         self.mlir.create_yield_op(yield_op)
         self.subgraph_initializer = None
     
         return yield_op
+
+
+
     
     def convert_if_op(self, onnx_node):
         """Convert ONNX If operator to TOP IR"""
