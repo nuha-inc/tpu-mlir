@@ -283,6 +283,7 @@ class OnnxConverter(BaseConverter):
             "Xor": lambda node: self.convert_cmp_op(node),
             "If": lambda node: self.convert_if_op(node),
             "Loop": lambda node: self.convert_loop_op(node),
+            "Size": lambda node: self.convert_size_op(node),
         }
 
     def __del__(self):
@@ -3110,3 +3111,39 @@ class OnnxConverter(BaseConverter):
                             loc=self.get_loc("{}_{}".format(onnx_node.name, onnx_node.op_type)),
                             ip=self.mlir.insert_point).output
         self.addOperand(onnx_node.name, new_op)
+
+
+    def convert_size_op(self, onnx_node):
+        """Convert ONNX Size operator to TOP IR.
+
+        The Size operator takes a tensor and returns a scalar tensor containing the total number
+        of elements of the input tensor.
+
+        Args:
+            onnx_node: The ONNX node to convert
+        """
+        assert(onnx_node.op_type == "Size")
+
+        # Get input operand
+        input_op = self.getOp(onnx_node.inputs[0])
+
+        # Create shape op to get the shape first
+        shape_op = top.ShapeOp(
+            self.unranked_type,
+            input_op,
+            loc=self.get_loc("{}_shape".format(onnx_node.name)),
+            ip=self.mlir.insert_point
+        ).output
+
+        # Create reduce op to multiply all dimensions together to get total size
+        size_op = top.ReduceOp(
+            self.unranked_type,
+            shape_op,
+            axes=[], # Reduce all dimensions
+            keepdims=False,
+            mode=StringAttr.get("ReduceProd"),
+            loc=self.get_loc("{}_{}".format(onnx_node.name, onnx_node.op_type)),
+            ip=self.mlir.insert_point
+        ).output
+
+        self.addOperand(onnx_node.name, size_op)
