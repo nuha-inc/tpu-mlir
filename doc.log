@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/workspace/tpu-mlir/docs/generate_operation.py", line 157, in <module>
+    op_set = [x.get_op_set() for x in frameworks]
+  File "/workspace/tpu-mlir/docs/generate_operation.py", line 157, in <listcomp>
+    op_set = [x.get_op_set() for x in frameworks]
+  File "/workspace/tpu-mlir/docs/generate_operation.py", line 112, in get_op_set
+    module_ast = ast.parse(open(path, "r").read())
+  File "/usr/lib/python3.10/ast.py", line 50, in parse
+    return compile(source, filename, mode, flags,
+  File "<unknown>", line 2936
+    def parse_subgraph(self, op, region_idx, graph_node):
+TabError: inconsistent use of tabs and spaces in indentation
